@@ -1,0 +1,14 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Training artifacts
+lightning_logs/
+mlruns/
+
+# Virtual environments
+.venv

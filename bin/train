@@ -1,0 +1,1 @@
+uv run python -m eye.training.train_eye_focus

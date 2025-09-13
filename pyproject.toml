@@ -1,0 +1,23 @@
+[project]
+name = "eye"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "jigsaw-ml",
+    "lightning>=2.5.5",
+    "matplotlib>=3.10.6",
+    "mlflow>=3.3.2",
+    "pydantic-settings>=2.10.1",
+    "torch==2.7.1", # Version 2.8 does not support GTX 1080
+    "torchvision==0.22.1", # Version 0.23 goes along with torch==2.8
+]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.12.12",
+]
+
+[tool.uv.sources]
+jigsaw-ml = { git = "https://github.com/asparagus/jigsaw-ml", rev = "main" }
