@@ -45,22 +45,29 @@ FASHION_MNIST_CLASSES = [
     "Ankle boot",
 ]
 
+# Training constants
+DEFAULT_BATCH_SIZE = 256
+DEFAULT_NUM_WORKERS = 7
+INITIAL_FOCUS_POSITION = [13.5, 13.5]
 
-def get_device():
+
+def get_device() -> torch.device:
     """Get the appropriate device for PyTorch operations."""
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logger.info(f"Using device: {device}")
     return device
 
 
-def get_transforms():
+def get_transforms() -> transforms.Compose:
     """Get the standard transforms for Fashion-MNIST."""
     return transforms.Compose(
         [transforms.ToTensor(), transforms.Normalize((0.5,), (0.5,))]
     )
 
 
-def load_datasets(transform):
+def load_datasets(
+    transform: transforms.Compose,
+) -> tuple[torchvision.datasets.FashionMNIST, torchvision.datasets.FashionMNIST]:
     """Load Fashion-MNIST train and test datasets."""
     train_dataset = torchvision.datasets.FashionMNIST(
         root="./data", train=True, download=True, transform=transform
@@ -71,7 +78,14 @@ def load_datasets(transform):
     return train_dataset, test_dataset
 
 
-def plot_focus_visualization(ax, img, focus_points, radius, test_label, prediction):
+def plot_focus_visualization(
+    ax: plt.Axes,
+    img: np.ndarray,
+    focus_points: np.ndarray,
+    radius: float,
+    test_label: int,
+    prediction: int,
+) -> None:
     """Plot focus trajectory visualization on a single axis."""
     ax.imshow(img, cmap="gray", extent=[0, 28, 28, 0])
     ax.set_title(
@@ -123,7 +137,7 @@ def plot_focus_visualization(ax, img, focus_points, radius, test_label, predicti
     ax.set_aspect("equal")
 
 
-def plot_focus_trajectory_over_time(ax, focus_points):
+def plot_focus_trajectory_over_time(ax: plt.Axes, focus_points: np.ndarray) -> None:
     """Plot focus position over iterations."""
     ax.plot(
         range(len(focus_points)),
@@ -184,7 +198,7 @@ class TrackingEyeFashionMNISTNet(LightningModule):
             x = x.squeeze(1)
 
         batch_size = x.shape[0]
-        initial_focus = torch.tensor([[13.5, 13.5]], device=x.device).repeat(
+        initial_focus = torch.tensor([INITIAL_FOCUS_POSITION], device=x.device).repeat(
             batch_size, 1
         )
 
@@ -209,14 +223,16 @@ class TrackingEyeFashionMNISTNet(LightningModule):
         accuracy = (predicted == labels).float().mean()
         return loss, accuracy
 
-    def training_step(self, batch, batch_idx):
+    def training_step(
+        self, batch: tuple[torch.Tensor, torch.Tensor], batch_idx: int
+    ) -> torch.Tensor:
         loss, accuracy = self.batch_step(batch)
         self.log("train_loss", loss, prog_bar=True)
         self.log("train_acc", accuracy, prog_bar=True)
 
         return loss
 
-    def on_before_optimizer_step(self, optimizer):
+    def on_before_optimizer_step(self, optimizer: torch.optim.Optimizer) -> None:
         """Log gradient histograms to TensorBoard."""
         if self.trainer.logger:
             for name, param in self.named_parameters():
@@ -225,14 +241,18 @@ class TrackingEyeFashionMNISTNet(LightningModule):
                         f"gradients/{name}", param.grad, self.global_step
                     )
 
-    def validation_step(self, batch, batch_idx):
+    def validation_step(
+        self, batch: tuple[torch.Tensor, torch.Tensor], batch_idx: int
+    ) -> torch.Tensor:
         loss, accuracy = self.batch_step(batch)
         self.log("val_loss", loss, prog_bar=True)
         self.log("val_acc", accuracy, prog_bar=True)
 
         return loss
 
-    def configure_optimizers(self):
+    def configure_optimizers(
+        self,
+    ) -> dict[str, torch.optim.Optimizer | torch.optim.lr_scheduler.LRScheduler]:
         optim = torch.optim.Adam(self.parameters(), lr=self.hparams.learning_rate)
         scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer=optim, gamma=0.99)
         return {
@@ -325,7 +345,9 @@ class VisualizationCallback(Callback):
         self.every_n_epochs = every_n_epochs
         self.num_examples = num_examples
 
-    def on_train_epoch_end(self, trainer, pl_module):
+    def on_train_epoch_end(
+        self, trainer: Trainer, pl_module: TrackingEyeFashionMNISTNet
+    ) -> None:
         current_epoch = trainer.current_epoch
 
         # Create visualization at specified intervals or at the end
@@ -363,9 +385,17 @@ def train(
     )
 
     train_loader = DataLoader(
-        train_dataset, batch_size=256, shuffle=True, num_workers=7
+        train_dataset,
+        batch_size=DEFAULT_BATCH_SIZE,
+        shuffle=True,
+        num_workers=DEFAULT_NUM_WORKERS,
     )
-    val_loader = DataLoader(val_dataset, batch_size=256, shuffle=False, num_workers=7)
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=DEFAULT_BATCH_SIZE,
+        shuffle=False,
+        num_workers=DEFAULT_NUM_WORKERS,
+    )
 
     # Create tracking model
     model = TrackingEyeFashionMNISTNet(

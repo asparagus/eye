@@ -22,6 +22,11 @@ class EmbeddingModule(Piece):
     """The module that produces the next eye embedding."""
 
     def __init__(self, num_filters: int):
+        """Initialize the embedding module.
+
+        Args:
+            num_filters: Number of filters for the embedding networks.
+        """
         super().__init__(piece_type="module")
         self.focus_embedding_network = nn.Linear(2, num_filters)
         self.retina_embedding_network = nn.Linear(num_filters, num_filters)

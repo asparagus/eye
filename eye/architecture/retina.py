@@ -11,6 +11,10 @@ from eye.architecture.names import (
 )
 
 
+# Retina constants
+STD_RADIUS_DIVISOR = 4
+
+
 class RetinaModule(Piece):
     """Simplified model of the retina.
 
@@ -35,7 +39,7 @@ class RetinaModule(Piece):
             frozen: Whether the filters are frozen (and do not learn)
         """
         super().__init__(piece_type="module")
-        self.std = fovea_radius / 4
+        self.std = fovea_radius / STD_RADIUS_DIVISOR
         self.fovea_radius = int(math.ceil(fovea_radius))
         self.base_coords = self.coords(dims=dims)
         kernel_size = 1 + 2 * self.fovea_radius
