@@ -26,4 +26,4 @@ This will download the dataset, train a simple network, and save the model.
 
 ## Results
 We can see the model learns to move the eye around, and gets most answers right
-![results-fashion-mnist](public/eye_results_fashion_mnist.png)
+![results-fashion-mnist](public/results.png)
