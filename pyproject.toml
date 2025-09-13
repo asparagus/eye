@@ -8,8 +8,8 @@ dependencies = [
     "jigsaw-ml",
     "lightning>=2.5.5",
     "matplotlib>=3.10.6",
-    "mlflow>=3.3.2",
     "pydantic-settings>=2.10.1",
+    "tensorboard>=2.20.0",
     "torch==2.7.1", # Version 2.8 does not support GTX 1080
     "torchvision==0.22.1", # Version 0.23 goes along with torch==2.8
 ]

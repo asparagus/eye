@@ -9,6 +9,7 @@ wheels/
 # Training artifacts
 lightning_logs/
 mlruns/
+tb_logs/
 
 # Virtual environments
 .venv

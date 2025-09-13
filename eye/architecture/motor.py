@@ -26,6 +26,7 @@ class MotorModule(Piece):
         self.zeros = torch.zeros_like(self.maxs)
         self.refocus = nn.Linear(in_features=num_filters, out_features=2, bias=True)
         self.loss = nn.MSELoss(reduction="none")
+        self.layer_norm = nn.LayerNorm(num_filters)
 
     def inputs(self) -> tuple[str, ...]:
         return (EMBEDDING, FOCUS_POINT)
@@ -46,18 +47,19 @@ class MotorModule(Piece):
         """
         embedding = inputs[EMBEDDING]
         focus = inputs[FOCUS_POINT]
+        batch_size = embedding.shape[0]
         assert len(embedding.shape) == 2
         assert len(focus.shape) == 2
-        assert embedding.shape[0] == focus.shape[0]
-        refocus = self.refocus(embedding)
+        assert batch_size == focus.shape[0]
+        refocus = self.refocus(self.layer_norm(embedding))
         new_focus = focus + refocus
-        assert new_focus.shape == (embedding.shape[0], 2)
+        assert new_focus.shape == (batch_size, 2)
 
         # Compute boundary violation loss using MSE between unclamped and clamped focus
         maxs = self.maxs.to(new_focus.device)
         zeros = self.zeros.to(new_focus.device)
         clamped_focus = torch.clamp(new_focus, min=zeros, max=maxs)
         boundary_loss = self.loss(new_focus, clamped_focus).sum(dim=1, keepdim=True)
-        assert boundary_loss.shape == (embedding.shape[0], 1)
+        assert boundary_loss.shape == (batch_size, 1)
 
         return {FOCUS_NEXT: new_focus, MOTOR_LOSS: boundary_loss}

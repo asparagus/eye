@@ -27,6 +27,10 @@ class EmbeddingModule(Piece):
         self.retina_embedding_network = nn.Linear(num_filters, num_filters)
         self.hidden_network = nn.Linear(num_filters, num_filters)
         self.embedding_network = nn.Linear(num_filters, num_filters)
+        self.focus_norm = nn.LayerNorm(num_filters)
+        self.retina_norm = nn.LayerNorm(num_filters)
+        self.hidden_norm = nn.LayerNorm(num_filters)
+        self.embedding_norm = nn.LayerNorm(num_filters)
 
     def inputs(self) -> tuple[str, ...]:
         return (RETINA_OUTPUT, EMBEDDING, FOCUS_POINT)
@@ -48,12 +52,18 @@ class EmbeddingModule(Piece):
         embedding = inputs[EMBEDDING]
         retina_output = inputs[RETINA_OUTPUT]
         focus = inputs[FOCUS_POINT]
-        focus_embedding = torch.relu(self.focus_embedding_network(focus))
-        retina_embedding = torch.relu(self.retina_embedding_network(retina_output))
-        hidden_embedding = torch.relu(
-            self.hidden_network(focus_embedding + retina_embedding)
+        focus_embedding = self.focus_norm(
+            torch.relu(self.focus_embedding_network(focus))
         )
-        embedding = torch.relu(embedding + self.embedding_network(hidden_embedding))
+        retina_embedding = self.retina_norm(
+            torch.relu(self.retina_embedding_network(retina_output))
+        )
+        hidden_embedding = self.hidden_norm(
+            torch.relu(self.hidden_network(focus_embedding + retina_embedding))
+        )
+        embedding = self.embedding_norm(
+            torch.relu(embedding + self.embedding_network(hidden_embedding))
+        )
         return {EMBEDDING: embedding}
 
 

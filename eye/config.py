@@ -8,7 +8,8 @@ from pydantic_settings import BaseSettings
 class Config(BaseSettings):
     """Configuration settings."""
 
-    MLFLOW_EXPERIMENT_NAME: str = "eye_experiment"
-    MLFLOW_TRACKING_URI: str = "http://localhost:8080"
+    TENSORBOARD_PROJECT_NAME: str = "eye"
+    TENSORBOARD_URL: str = ""
+    TENSORBOARD_LOGS: str = "tb_logs"
 
     LOG_LEVEL: Literal["ERROR", "WARNING", "INFO", "DEBUG"] = "INFO"

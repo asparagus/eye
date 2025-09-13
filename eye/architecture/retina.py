@@ -58,6 +58,7 @@ class RetinaModule(Piece):
             std=self.std,
         )
         self.normalization_constant = kernel_mask.sum()
+        self.layer_norm = torch.nn.LayerNorm(num_filters)
 
     @classmethod
     def coords(cls, dims: tuple[int, ...]) -> torch.Tensor:
@@ -170,4 +171,6 @@ class RetinaModule(Piece):
         """
         image = inputs[IMAGE_INPUT]
         focus = inputs[FOCUS_POINT]
-        return {RETINA_OUTPUT: self.filter_output(image=image, focus=focus)}
+        return {
+            RETINA_OUTPUT: self.layer_norm(self.filter_output(image=image, focus=focus))
+        }

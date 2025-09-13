@@ -9,8 +9,12 @@ import torch.nn as nn
 import torchvision
 import torchvision.transforms as transforms
 from lightning.pytorch import LightningModule, Trainer
-from lightning.pytorch.callbacks import Callback, ModelCheckpoint
-from lightning.pytorch.loggers import MLFlowLogger
+from lightning.pytorch.callbacks import (
+    Callback,
+    LearningRateMonitor,
+    ModelCheckpoint,
+)
+from lightning.pytorch.loggers import TensorBoardLogger
 from torch.utils.data import DataLoader
 
 from eye import CONFIG
@@ -212,6 +216,15 @@ class TrackingEyeFashionMNISTNet(LightningModule):
 
         return loss
 
+    def on_before_optimizer_step(self, optimizer):
+        """Log gradient histograms to TensorBoard."""
+        if self.trainer.logger:
+            for name, param in self.named_parameters():
+                if param.grad is not None:
+                    self.logger.experiment.add_histogram(
+                        f"gradients/{name}", param.grad, self.global_step
+                    )
+
     def validation_step(self, batch, batch_idx):
         loss, accuracy = self.batch_step(batch)
         self.log("val_loss", loss, prog_bar=True)
@@ -220,7 +233,12 @@ class TrackingEyeFashionMNISTNet(LightningModule):
         return loss
 
     def configure_optimizers(self):
-        return torch.optim.Adam(self.parameters(), lr=self.hparams.learning_rate)
+        optim = torch.optim.Adam(self.parameters(), lr=self.hparams.learning_rate)
+        scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer=optim, gamma=0.99)
+        return {
+            "optimizer": optim,
+            "lr_scheduler": scheduler,
+        }
 
 
 def visualize_eye_focus_movements(
@@ -365,23 +383,23 @@ def train(
         every_n_epochs=1,
     )
 
+    learning_rate_monitor = LearningRateMonitor(logging_interval="epoch")
+
     visualization_callback = VisualizationCallback(
         dirpath="visualizations/", filename="eye_model_epoch_{epoch}", every_n_epochs=2
     )
 
-    # Create trainer
-    mlf_logger = MLFlowLogger(
-        experiment_name=CONFIG.MLFLOW_EXPERIMENT_NAME,
-        tracking_uri=CONFIG.MLFLOW_TRACKING_URI,
+    tb_logger = TensorBoardLogger(
+        CONFIG.TENSORBOARD_LOGS, name=CONFIG.TENSORBOARD_PROJECT_NAME
     )
     trainer = Trainer(
         max_epochs=max_epochs,
-        callbacks=[checkpoint_callback, visualization_callback],
+        callbacks=[checkpoint_callback, visualization_callback, learning_rate_monitor],
         accelerator="auto",
         devices="auto",
         enable_progress_bar=True,
         log_every_n_steps=50,
-        logger=mlf_logger,
+        logger=[tb_logger],
     )
 
     # Train the model
