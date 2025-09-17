@@ -20,12 +20,12 @@ from torch.utils.data import DataLoader
 from eye import CONFIG
 from eye.architecture.module import EyeModule
 from eye.architecture.names import (
-    EMBEDDING,
-    EMBEDDING_HISTORY,
     FOCUS_POINT,
     FOCUS_HISTORY,
     IMAGE_INPUT,
     MOTOR_LOSS,
+    STATE,
+    STATE_HISTORY,
 )
 
 
@@ -46,9 +46,8 @@ FASHION_MNIST_CLASSES = [
 ]
 
 # Training constants
-DEFAULT_BATCH_SIZE = 256
-DEFAULT_NUM_WORKERS = 7
-INITIAL_FOCUS_POSITION = [13.5, 13.5]
+DEFAULT_BATCH_SIZE = 1024
+DEFAULT_NUM_WORKERS = 6  # Increased for better data loading performance
 
 
 def get_device() -> torch.device:
@@ -137,7 +136,12 @@ def plot_focus_visualization(
     ax.set_aspect("equal")
 
 
-def plot_focus_trajectory_over_time(ax: plt.Axes, focus_points: np.ndarray) -> None:
+def plot_focus_trajectory_over_time(
+    ax: plt.Axes,
+    focus_points: np.ndarray,
+    classification_probs: np.ndarray,
+    true_label: int,
+) -> None:
     """Plot focus position over iterations."""
     ax.plot(
         range(len(focus_points)),
@@ -162,6 +166,56 @@ def plot_focus_trajectory_over_time(ax: plt.Axes, focus_points: np.ndarray) -> N
     ax.set_ylim(0, 28)
 
 
+def plot_classification_over_time(
+    ax: plt.Axes, classification_probs: np.ndarray, true_label: int
+) -> None:
+    """Plot classification probability for true class over iterations."""
+    true_class_probs = classification_probs[:, true_label]
+    predicted_classes = np.argmax(classification_probs, axis=1)
+
+    # Plot probability of true class
+    ax.plot(
+        range(len(true_class_probs)),
+        true_class_probs,
+        "g-",
+        marker="o",
+        linewidth=2,
+        label=f"P({FASHION_MNIST_CLASSES[true_label]})",
+    )
+
+    # Mark correct predictions
+    correct_predictions = predicted_classes == true_label
+    ax.scatter(
+        np.where(correct_predictions)[0],
+        true_class_probs[correct_predictions],
+        color="green",
+        s=50,
+        marker="^",
+        alpha=0.8,
+        label="Correct",
+    )
+
+    # Mark incorrect predictions
+    incorrect_predictions = predicted_classes != true_label
+    ax.scatter(
+        np.where(incorrect_predictions)[0],
+        true_class_probs[incorrect_predictions],
+        color="red",
+        s=50,
+        marker="v",
+        alpha=0.8,
+        label="Incorrect",
+    )
+
+    ax.set_xlabel("Iteration")
+    ax.set_ylabel("Probability")
+    ax.set_title("Classification Over Time")
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    ax.set_xlim(-0.1, len(true_class_probs) - 0.9)
+    ax.set_ylim(0, 1)
+
+
 class TrackingEyeFashionMNISTNet(LightningModule):
     """Modified network that tracks eye focus movements using PyTorch Lightning."""
 
@@ -172,6 +226,7 @@ class TrackingEyeFashionMNISTNet(LightningModule):
         fovea_radius: float,
         learning_rate: float,
         retina_frozen: bool = True,
+        motor_noise_std: float = 0.0,
         dims: tuple[int, int] = (28, 28),
         num_classes: int = 10,
     ):
@@ -184,12 +239,38 @@ class TrackingEyeFashionMNISTNet(LightningModule):
             iterations=iterations,
             fovea_radius=fovea_radius,
             retina_frozen=retina_frozen,
+            motor_noise_std=motor_noise_std,
         )
+        self.iterations = iterations
         self.fovea_radius = fovea_radius
         self.classifier = nn.Sequential(
-            nn.Linear(num_filters, num_classes),
+            nn.LayerNorm(num_filters),
+            nn.Linear(num_filters, num_filters, bias=True),
+            nn.ReLU(),
+            nn.LayerNorm(num_filters),
+            nn.Linear(num_filters, num_filters, bias=True),
+            nn.ReLU(),
+            nn.LayerNorm(num_filters),
+            nn.Linear(num_filters, num_classes, bias=True),
         )
         self.criterion = nn.CrossEntropyLoss()
+
+    def get_training_progress(self) -> float:
+        """Get training progress as a value between 0 and 1.
+
+        Returns:
+            Progress value where 0 is start of training, 1 is end of training.
+        """
+        if not self.training or not hasattr(self, "trainer") or self.trainer is None:
+            return 1.0  # Default to full randomness during inference
+
+        current_epoch = self.trainer.current_epoch
+        max_epochs = self.trainer.max_epochs
+
+        if max_epochs is None or max_epochs <= 0:
+            return 1.0
+
+        return min(current_epoch / max_epochs, 1.0)
 
     def forward(
         self, x: torch.Tensor
@@ -198,25 +279,50 @@ class TrackingEyeFashionMNISTNet(LightningModule):
             x = x.squeeze(1)
 
         batch_size = x.shape[0]
-        initial_focus = torch.tensor([INITIAL_FOCUS_POSITION], device=x.device).repeat(
-            batch_size, 1
-        )
+        # Curriculum learning: start from center, gradually increase randomness
+        if self.training:
+            progress = self.get_training_progress()
+        else:
+            progress = 0.0
+        center = torch.tensor([13.5, 13.5], device=x.device).expand(batch_size, 2)
+
+        if progress < 1.0:
+            # Random offset that grows from 0 to full range over training
+            max_offset = (
+                13.5 * progress
+            )  # Start at center (0 offset), grow to full range
+            random_offset = (
+                (torch.rand(batch_size, 2, device=x.device) - 0.5) * 2 * max_offset
+            )
+            initial_focus = center + random_offset
+            # Clamp to valid range [0, 27]
+            initial_focus = torch.clamp(initial_focus, 0.0, 27.0)
+        else:
+            # Full random after training is complete
+            initial_focus = torch.rand(batch_size, 2, device=x.device) * 27.0
 
         results = self.eye.forward({IMAGE_INPUT: x, FOCUS_POINT: initial_focus})
-        eye_features = results[EMBEDDING]
-        embedding_history = results[EMBEDDING_HISTORY]
+        state = results[STATE]
+        state_history = results[STATE_HISTORY]
         focus_trajectory = results[FOCUS_HISTORY]
         motor_loss = results[MOTOR_LOSS]
-        output = self.classifier(eye_features)
+        output = self.classifier(state)
+        output_history = self.classifier(state_history)
 
-        return output, focus_trajectory, embedding_history, motor_loss
+        return output, focus_trajectory, output_history, motor_loss
 
     def batch_step(
         self, batch: tuple[torch.Tensor, torch.Tensor]
     ) -> tuple[torch.Tensor, torch.Tensor]:
         images, labels = batch
-        outputs, _, _, motor_loss = self.forward(images)
-        loss = self.criterion(outputs, labels) + motor_loss.mean()
+        outputs, _, output_history, motor_loss = self.forward(images)
+        batch_size = images.shape[0]
+        assert output_history.shape == (batch_size, self.iterations, 10)
+
+        # Train all time steps to predict the correct class
+        output_history_flat = output_history.view(-1, 10)
+        labels_expanded = labels.repeat_interleave(self.iterations)
+        loss = self.criterion(output_history_flat, labels_expanded) + motor_loss.mean()
 
         # Calculate accuracy
         _, predicted = torch.max(outputs, 1)
@@ -254,7 +360,7 @@ class TrackingEyeFashionMNISTNet(LightningModule):
         self,
     ) -> dict[str, torch.optim.Optimizer | torch.optim.lr_scheduler.LRScheduler]:
         optim = torch.optim.Adam(self.parameters(), lr=self.hparams.learning_rate)
-        scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer=optim, gamma=0.99)
+        scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer=optim, gamma=0.95)
         return {
             "optimizer": optim,
             "lr_scheduler": scheduler,
@@ -270,35 +376,82 @@ def visualize_eye_focus_movements(
         model: Pre-loaded TrackingEyeFashionMNISTNet model
         output_path: Path where the visualization will be saved
         num_examples: Number of examples to visualize (default: 16)
-        title: Title for the visualization (default: "Eye Focus Movements")
     """
     device = next(model.parameters()).device
     transform = get_transforms()
 
     # Load test dataset for visualization
     _, test_dataset = load_datasets(transform)
-    test_loader = DataLoader(test_dataset, batch_size=num_examples, shuffle=False)
 
-    # Get a batch of test images
-    test_images, test_labels = next(iter(test_loader))
-    test_images = test_images.to(device)
-    test_labels = test_labels.to(device)
+    half_examples = num_examples // 2
+
+    # First half: consistent examples (same indices each time for tracking progress)
+    consistent_indices = list(range(half_examples))
+    consistent_loader = DataLoader(
+        torch.utils.data.Subset(test_dataset, consistent_indices),
+        batch_size=half_examples,
+        shuffle=False,
+    )
+    consistent_images, consistent_labels = next(iter(consistent_loader))
+
+    # Second half: find incorrect predictions from a larger sample
+    large_batch_size = min(200, len(test_dataset) - half_examples)
+    remaining_indices = list(range(half_examples, half_examples + large_batch_size))
+    remaining_loader = DataLoader(
+        torch.utils.data.Subset(test_dataset, remaining_indices),
+        batch_size=large_batch_size,
+        shuffle=False,
+    )
+    remaining_images, remaining_labels = next(iter(remaining_loader))
+
+    # Move to device
+    consistent_images = consistent_images.to(device)
+    consistent_labels = consistent_labels.to(device)
+    remaining_images = remaining_images.to(device)
+    remaining_labels = remaining_labels.to(device)
 
     model.eval()
     with torch.no_grad():
-        outputs, focus_trajectories, _embedding_history, _motor_loss = model(
-            test_images
+        # Get predictions for remaining examples to find incorrect ones
+        remaining_outputs, remaining_trajectories, _, _ = model(remaining_images)
+        remaining_predictions = torch.max(remaining_outputs, 1)[1]
+
+        # Find incorrect predictions
+        incorrect_mask = remaining_predictions != remaining_labels
+        incorrect_indices = torch.where(incorrect_mask)[0]
+
+        # Select incorrect examples for second half
+        remaining_slots = num_examples - half_examples
+        if len(incorrect_indices) >= remaining_slots:
+            selected_incorrect = incorrect_indices[:remaining_slots]
+        else:
+            # If not enough incorrect, just use what we have
+            selected_incorrect = incorrect_indices
+
+        # Combine consistent and incorrect examples
+        all_images = torch.cat(
+            [consistent_images, remaining_images[selected_incorrect]]
         )
-        predictions = torch.max(outputs, 1)[1]
+        all_labels = torch.cat(
+            [consistent_labels, remaining_labels[selected_incorrect]]
+        )
 
-    # Create visualization
-    _fig, axes = plt.subplots(2, num_examples, figsize=(4 * num_examples, 8))
-    if num_examples == 1:
-        axes = axes.reshape(2, 1)
+        # Get final predictions and trajectories for visualization
+        all_outputs, all_trajectories, all_output_history, _ = model(all_images)
+        all_predictions = torch.max(all_outputs, 1)[1]
 
-    for i in range(num_examples):
+        # Convert output history to probabilities for classification over time
+        all_classification_history = torch.softmax(all_output_history, dim=-1)
+
+    # Create visualization: 3 rows - focus plots, classification plots, error examples
+    _fig, axes = plt.subplots(3, half_examples, figsize=(4 * half_examples, 12))
+    if half_examples == 1:
+        axes = axes.reshape(3, 1)
+
+    # Top row: Stable/consistent examples
+    for i in range(half_examples):
         # Original image
-        img = test_images[i].cpu().numpy()
+        img = all_images[i].cpu().numpy()
         if len(img.shape) == 3 and img.shape[0] == 1:
             img = img.squeeze(0)
 
@@ -306,20 +459,52 @@ def visualize_eye_focus_movements(
         img = img * 0.5 + 0.5
 
         # Plot focus trajectory
-        trajectory = focus_trajectories[i].cpu().numpy()
+        trajectory = all_trajectories[i].cpu().numpy()
 
-        # Top row: Original image with focus trajectory
         plot_focus_visualization(
             axes[0, i],
             img,
             trajectory,
             model.fovea_radius,
-            test_labels[i],
-            predictions[i],
+            all_labels[i],
+            all_predictions[i],
         )
 
-        # Bottom row: Focus trajectory over iterations
-        plot_focus_trajectory_over_time(axes[1, i], trajectory)
+        # Second row: Classification over time for consistent examples
+        classification_probs = all_classification_history[i].cpu().numpy()
+        plot_classification_over_time(
+            axes[1, i],
+            classification_probs,
+            all_labels[i].item(),
+        )
+
+    # Third row: Error examples
+    num_errors = len(selected_incorrect)
+    for i in range(half_examples):
+        if i < num_errors:
+            error_idx = half_examples + i
+            # Original image
+            img = all_images[error_idx].cpu().numpy()
+            if len(img.shape) == 3 and img.shape[0] == 1:
+                img = img.squeeze(0)
+
+            # Denormalize image for display
+            img = img * 0.5 + 0.5
+
+            # Plot focus trajectory
+            trajectory = all_trajectories[error_idx].cpu().numpy()
+
+            plot_focus_visualization(
+                axes[2, i],
+                img,
+                trajectory,
+                model.fovea_radius,
+                all_labels[error_idx],
+                all_predictions[error_idx],
+            )
+        else:
+            # Hide axis if no error example available
+            axes[2, i].set_visible(False)
 
     plt.tight_layout()
     plt.subplots_adjust(top=0.93)
@@ -327,7 +512,18 @@ def visualize_eye_focus_movements(
     # Save visualization
     plt.savefig(output_path, dpi=150, bbox_inches="tight")
     plt.close()
-    logger.info(f"Visualization saved as {output_path}")
+
+    consistent_correct = (
+        (all_predictions[:half_examples] == all_labels[:half_examples]).sum().item()
+    )
+    incorrect_count = (
+        len(selected_incorrect)
+        if len(incorrect_indices) >= remaining_slots
+        else len(incorrect_indices)
+    )
+    logger.info(
+        f"Visualization saved as {output_path} ({consistent_correct}/{half_examples} consistent examples correct, {incorrect_count} incorrect examples shown)"
+    )
 
 
 class VisualizationCallback(Callback):
@@ -373,6 +569,7 @@ def train(
     fovea_radius: float,
     learning_rate: float,
     retina_frozen: bool,
+    motor_noise_std: float = 0.0,
 ):
     transform = get_transforms()
     train_dataset, test_dataset = load_datasets(transform)
@@ -389,12 +586,19 @@ def train(
         batch_size=DEFAULT_BATCH_SIZE,
         shuffle=True,
         num_workers=DEFAULT_NUM_WORKERS,
+        pin_memory=True,
+        drop_last=True,
+        persistent_workers=True,  # Keep workers alive between epochs
+        prefetch_factor=4,  # Prefetch more batches per worker
     )
     val_loader = DataLoader(
         val_dataset,
         batch_size=DEFAULT_BATCH_SIZE,
         shuffle=False,
         num_workers=DEFAULT_NUM_WORKERS,
+        pin_memory=True,
+        persistent_workers=True,
+        prefetch_factor=4,
     )
 
     # Create tracking model
@@ -404,7 +608,25 @@ def train(
         fovea_radius=fovea_radius,
         learning_rate=learning_rate,
         retina_frozen=retina_frozen,
+        motor_noise_std=motor_noise_std,
     )
+
+    # Compile model for PyTorch 2.0 speedup (requires CUDA capability >= 7.0)
+    try:
+        if torch.cuda.is_available():
+            device_capability = torch.cuda.get_device_capability()
+            if device_capability[0] >= 7:  # Major version >= 7
+                model = torch.compile(model, mode="reduce-overhead")
+                logger.info("Model compiled with PyTorch 2.0 for additional speedup")
+            else:
+                logger.info(
+                    f"GPU CUDA capability {device_capability[0]}.{device_capability[1]} < 7.0, skipping compilation"
+                )
+        else:
+            logger.info("No CUDA available, skipping compilation")
+    except Exception as e:
+        logger.warning(f"Could not compile model: {e}")
+        logger.info("Continuing without compilation")
 
     checkpoint_callback = ModelCheckpoint(
         dirpath="saved/",
@@ -430,6 +652,7 @@ def train(
         enable_progress_bar=True,
         log_every_n_steps=50,
         logger=[tb_logger],
+        precision="16-mixed",  # Mixed precision for ~2x speedup
     )
 
     # Train the model
@@ -441,9 +664,10 @@ def train(
 if __name__ == "__main__":
     train(
         max_epochs=50,
-        num_filters=128,
-        iterations=15,
+        num_filters=96,  # Reduced from 128 for faster training
+        iterations=12,  # Reduced from 15 for faster iterations
         fovea_radius=3.0,
-        learning_rate=0.0001,
+        learning_rate=8e-6,  # Slightly higher since we have fewer params
         retina_frozen=True,
+        motor_noise_std=0.5,
     )

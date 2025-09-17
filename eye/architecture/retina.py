@@ -12,7 +12,7 @@ from eye.architecture.names import (
 
 
 # Retina constants
-STD_RADIUS_DIVISOR = 4
+STD_RADIUS_DIVISOR = 6
 
 
 class RetinaModule(Piece):
