@@ -1,5 +1,7 @@
+
 import logging
 import pathlib
+from typing import Literal
 
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
@@ -45,9 +47,8 @@ FASHION_MNIST_CLASSES = [
     "Ankle boot",
 ]
 
-# Training constants
-DEFAULT_BATCH_SIZE = 1024
-DEFAULT_NUM_WORKERS = 6  # Increased for better data loading performance
+
+DEFAULT_NUM_WORKERS = 6
 
 
 def get_device() -> torch.device:
@@ -136,36 +137,6 @@ def plot_focus_visualization(
     ax.set_aspect("equal")
 
 
-def plot_focus_trajectory_over_time(
-    ax: plt.Axes,
-    focus_points: np.ndarray,
-    classification_probs: np.ndarray,
-    true_label: int,
-) -> None:
-    """Plot focus position over iterations."""
-    ax.plot(
-        range(len(focus_points)),
-        focus_points[:, 0],
-        "r-",
-        marker="o",
-        label="Y (row)",
-    )
-    ax.plot(
-        range(len(focus_points)),
-        focus_points[:, 1],
-        "b-",
-        marker="s",
-        label="X (col)",
-    )
-    ax.set_xlabel("Iteration")
-    ax.set_ylabel("Focus Position")
-    ax.set_title("Focus Movement Over Time")
-    ax.legend()
-    ax.grid(True, alpha=0.3)
-    ax.set_xlim(-0.1, len(focus_points) - 0.9)
-    ax.set_ylim(0, 28)
-
-
 def plot_classification_over_time(
     ax: plt.Axes, classification_probs: np.ndarray, true_label: int
 ) -> None:
@@ -224,20 +195,26 @@ class TrackingEyeFashionMNISTNet(LightningModule):
         num_filters: int,
         iterations: int,
         fovea_radius: float,
+        retina_std: float,
         learning_rate: float,
-        retina_frozen: bool = True,
-        motor_noise_std: float = 0.0,
+        learning_rate_decay: float,
+        enable_curriculum_learning: bool,
+        retina_frozen: bool,
+        motor_noise_std: float,
+        recurrent_module: Literal["rnn", "lstm"],
         dims: tuple[int, int] = (28, 28),
         num_classes: int = 10,
     ):
         super().__init__()
-        self.save_hyperparameters()
+        self.save_hyperparameters(ignore=["dims", "num_classes"])
 
         self.eye = EyeModule(
             dims=dims,
             num_filters=num_filters,
             iterations=iterations,
             fovea_radius=fovea_radius,
+            retina_std=retina_std,
+            recurrent_module=recurrent_module,
             retina_frozen=retina_frozen,
             motor_noise_std=motor_noise_std,
         )
@@ -254,6 +231,10 @@ class TrackingEyeFashionMNISTNet(LightningModule):
             nn.Linear(num_filters, num_classes, bias=True),
         )
         self.criterion = nn.CrossEntropyLoss()
+        self.learning_rate = learning_rate
+        self.learning_rate_decay = learning_rate_decay
+        self.enable_curriculum_learning = enable_curriculum_learning
+        self.num_classes = num_classes
 
     def get_training_progress(self) -> float:
         """Get training progress as a value between 0 and 1.
@@ -279,27 +260,32 @@ class TrackingEyeFashionMNISTNet(LightningModule):
             x = x.squeeze(1)
 
         batch_size = x.shape[0]
-        # Curriculum learning: start from center, gradually increase randomness
-        if self.training:
-            progress = self.get_training_progress()
-        else:
-            progress = 0.0
         center = torch.tensor([13.5, 13.5], device=x.device).expand(batch_size, 2)
 
-        if progress < 1.0:
-            # Random offset that grows from 0 to full range over training
-            max_offset = (
-                13.5 * progress
-            )  # Start at center (0 offset), grow to full range
-            random_offset = (
-                (torch.rand(batch_size, 2, device=x.device) - 0.5) * 2 * max_offset
-            )
-            initial_focus = center + random_offset
-            # Clamp to valid range [0, 27]
-            initial_focus = torch.clamp(initial_focus, 0.0, 27.0)
+        if self.enable_curriculum_learning:
+            # Curriculum learning: start from center, gradually increase randomness
+            if self.training:
+                progress = self.get_training_progress()
+            else:
+                progress = 0.0
+
+            if progress < 1.0:
+                # Random offset that grows from 0 to full range over training
+                max_offset = (
+                    13.5 * progress
+                )  # Start at center (0 offset), grow to full range
+                random_offset = (
+                    (torch.rand(batch_size, 2, device=x.device) - 0.5) * 2 * max_offset
+                )
+                initial_focus = center + random_offset
+                # Clamp to valid range [0, 27]
+                initial_focus = torch.clamp(initial_focus, 0.0, 27.0)
+            else:
+                # Full random after training is complete
+                initial_focus = torch.rand(batch_size, 2, device=x.device) * 27.0
         else:
-            # Full random after training is complete
-            initial_focus = torch.rand(batch_size, 2, device=x.device) * 27.0
+            # Fixed center initialization without curriculum learning
+            initial_focus = center
 
         results = self.eye.forward({IMAGE_INPUT: x, FOCUS_POINT: initial_focus})
         state = results[STATE]
@@ -317,10 +303,10 @@ class TrackingEyeFashionMNISTNet(LightningModule):
         images, labels = batch
         outputs, _, output_history, motor_loss = self.forward(images)
         batch_size = images.shape[0]
-        assert output_history.shape == (batch_size, self.iterations, 10)
+        assert output_history.shape == (batch_size, self.iterations, self.num_classes)
 
         # Train all time steps to predict the correct class
-        output_history_flat = output_history.view(-1, 10)
+        output_history_flat = output_history.view(-1, self.num_classes)
         labels_expanded = labels.repeat_interleave(self.iterations)
         loss = self.criterion(output_history_flat, labels_expanded) + motor_loss.mean()
 
@@ -338,14 +324,17 @@ class TrackingEyeFashionMNISTNet(LightningModule):
 
         return loss
 
-    def on_before_optimizer_step(self, optimizer: torch.optim.Optimizer) -> None:
-        """Log gradient histograms to TensorBoard."""
-        if self.trainer.logger:
-            for name, param in self.named_parameters():
-                if param.grad is not None:
-                    self.logger.experiment.add_histogram(
-                        f"gradients/{name}", param.grad, self.global_step
-                    )
+    # def on_before_optimizer_step(self, optimizer: torch.optim.Optimizer) -> None:
+    #     """Log gradient histograms to TensorBoard."""
+    #     if self.trainer.logger:
+    #         for name, param in self.named_parameters():
+    #             if param.grad is not None and param.grad.size(dim=0) >= 2:
+    #                 self.logger.experiment.add_histogram(
+    #                     f"gradients/{name}", param.grad, self.global_step
+    #                 )
+
+    def on_train_start(self):
+        self.logger.log_hyperparams(self.hparams, {"hp_metric": 0})
 
     def validation_step(
         self, batch: tuple[torch.Tensor, torch.Tensor], batch_idx: int
@@ -353,14 +342,15 @@ class TrackingEyeFashionMNISTNet(LightningModule):
         loss, accuracy = self.batch_step(batch)
         self.log("val_loss", loss, prog_bar=True)
         self.log("val_acc", accuracy, prog_bar=True)
+        self.log("hp_metric", accuracy)
 
         return loss
 
     def configure_optimizers(
         self,
     ) -> dict[str, torch.optim.Optimizer | torch.optim.lr_scheduler.LRScheduler]:
-        optim = torch.optim.Adam(self.parameters(), lr=self.hparams.learning_rate)
-        scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer=optim, gamma=0.95)
+        optim = torch.optim.Adam(self.parameters(), lr=self.learning_rate)
+        scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer=optim, gamma=self.learning_rate_decay)
         return {
             "optimizer": optim,
             "lr_scheduler": scheduler,
@@ -567,9 +557,14 @@ def train(
     num_filters: int,
     iterations: int,
     fovea_radius: float,
+    retina_std: float,
     learning_rate: float,
+    learning_rate_decay: float,
     retina_frozen: bool,
-    motor_noise_std: float = 0.0,
+    motor_noise_std: float,
+    enable_curriculum_learning: bool,
+    recurrent_module: Literal["rnn", "lstm"],
+    batch_size: int,
 ):
     transform = get_transforms()
     train_dataset, test_dataset = load_datasets(transform)
@@ -583,17 +578,17 @@ def train(
 
     train_loader = DataLoader(
         train_dataset,
-        batch_size=DEFAULT_BATCH_SIZE,
+        batch_size=batch_size,
         shuffle=True,
         num_workers=DEFAULT_NUM_WORKERS,
         pin_memory=True,
         drop_last=True,
-        persistent_workers=True,  # Keep workers alive between epochs
-        prefetch_factor=4,  # Prefetch more batches per worker
+        persistent_workers=True,
+        prefetch_factor=4,
     )
     val_loader = DataLoader(
         val_dataset,
-        batch_size=DEFAULT_BATCH_SIZE,
+        batch_size=batch_size,
         shuffle=False,
         num_workers=DEFAULT_NUM_WORKERS,
         pin_memory=True,
@@ -606,9 +601,13 @@ def train(
         num_filters=num_filters,
         iterations=iterations,
         fovea_radius=fovea_radius,
+        retina_std=retina_std,
         learning_rate=learning_rate,
+        learning_rate_decay=learning_rate_decay,
         retina_frozen=retina_frozen,
         motor_noise_std=motor_noise_std,
+        enable_curriculum_learning=enable_curriculum_learning,
+        recurrent_module=recurrent_module,
     )
 
     # Compile model for PyTorch 2.0 speedup (requires CUDA capability >= 7.0)
@@ -644,6 +643,7 @@ def train(
     tb_logger = TensorBoardLogger(
         CONFIG.TENSORBOARD_LOGS, name=CONFIG.TENSORBOARD_PROJECT_NAME
     )
+    logger.info(f"Starting training run tb_logger {CONFIG.TENSORBOARD_PROJECT_NAME}/{tb_logger.version}")
     trainer = Trainer(
         max_epochs=max_epochs,
         callbacks=[checkpoint_callback, visualization_callback, learning_rate_monitor],
@@ -652,7 +652,6 @@ def train(
         enable_progress_bar=True,
         log_every_n_steps=50,
         logger=[tb_logger],
-        precision="16-mixed",  # Mixed precision for ~2x speedup
     )
 
     # Train the model
@@ -663,11 +662,16 @@ def train(
 
 if __name__ == "__main__":
     train(
-        max_epochs=50,
-        num_filters=96,  # Reduced from 128 for faster training
-        iterations=12,  # Reduced from 15 for faster iterations
+        max_epochs=30,
+        num_filters=128,
+        iterations=15,
         fovea_radius=3.0,
-        learning_rate=8e-6,  # Slightly higher since we have fewer params
+        retina_std=0.75,
+        learning_rate=1e-4,
+        learning_rate_decay=0.99,
         retina_frozen=True,
-        motor_noise_std=0.5,
+        motor_noise_std=2.0,
+        enable_curriculum_learning=False,
+        recurrent_module="rnn",
+        batch_size=256,
     )

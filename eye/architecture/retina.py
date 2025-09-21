@@ -11,10 +11,6 @@ from eye.architecture.names import (
 )
 
 
-# Retina constants
-STD_RADIUS_DIVISOR = 6
-
-
 class RetinaModule(Piece):
     """Simplified model of the retina.
 
@@ -27,6 +23,7 @@ class RetinaModule(Piece):
         dims: tuple[int, int],
         num_filters: int,
         fovea_radius: float,
+        std: float,
         frozen: bool = True,
     ):
         """Initialize the retina module.
@@ -36,10 +33,11 @@ class RetinaModule(Piece):
             num_filters: The number of filters to use in the convolutional layer.
             fovea_radius: The radius of the fovea which relates to the kernel size
               and the gaussian mask function.
+            std: Parameter for the gaussian filter that focuses on the focus point.
             frozen: Whether the filters are frozen (and do not learn)
         """
         super().__init__(piece_type="module")
-        self.std = fovea_radius / STD_RADIUS_DIVISOR
+        self.std = std
         self.fovea_radius = int(math.ceil(fovea_radius))
         self.base_coords = self.coords(dims=dims)
         kernel_size = 1 + 2 * self.fovea_radius
