@@ -8,6 +8,8 @@ dependencies = [
     "jigsaw-ml",
     "lightning>=2.5.5",
     "matplotlib>=3.10.6",
+    "optuna>=4.5.0",
+    "optuna-dashboard>=0.19.0",
     "pydantic-settings>=2.10.1",
     "tensorboard>=2.20.0",
     "torch==2.7.1", # Version 2.8 does not support GTX 1080

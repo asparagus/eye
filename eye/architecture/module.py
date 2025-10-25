@@ -8,11 +8,12 @@ import torch.nn as nn
 from jigsaw import Composite, Piece
 
 from eye.architecture.names import (
-    FOCUS_HISTORY,
-    FOCUS_NEXT,
-    FOCUS_POINT,
+    ATTENTION,
+    ATTENTION_NEXT,
+    ATTENTION_HISTORY,
+    DOWNSAMPLED_IMAGE,
     IMAGE_INPUT,
-    MOTOR_LOSS,
+    PERIPHERAL_OUTPUT,
     RETINA_OUTPUT,
     STATE_CELL,
     STATE,
@@ -28,82 +29,80 @@ logger = logging.getLogger(__name__)
 class RNNStateModule(Piece):
     """The module that produces the next eye state."""
 
-    def __init__(self, num_filters: int):
+    def __init__(self, num_filters: int, embedding_dimension: int):
         """Initialize the state module.
 
         Args:
             num_filters: Number of filters for the embedding networks.
+            embedding_dimension: Dimension for the embedding networks.
         """
         super().__init__(piece_type="module")
-        self.focus_embedding_network = nn.Linear(2, num_filters)
-        self.retina_embedding_network = nn.Linear(num_filters, num_filters)
-        self.hidden_network = nn.Linear(num_filters, num_filters)
-        self.state_network = nn.Linear(num_filters, num_filters)
-        self.focus_norm = nn.LayerNorm(num_filters)
-        self.retina_norm = nn.LayerNorm(num_filters)
-        self.hidden_norm = nn.LayerNorm(num_filters)
-        self.state_norm = nn.LayerNorm(num_filters)
+        self.retina_embed = nn.Sequential(
+            nn.Linear(num_filters, embedding_dimension),
+            nn.ReLU(),
+            nn.LayerNorm(embedding_dimension),
+        )
+        self.state_network = nn.Sequential(
+            nn.Linear(embedding_dimension, embedding_dimension),
+            nn.ReLU(),
+            nn.LayerNorm(embedding_dimension),
+            nn.Linear(embedding_dimension, embedding_dimension),
+            nn.ReLU(),
+            nn.LayerNorm(embedding_dimension),
+            nn.Linear(embedding_dimension, embedding_dimension),
+            nn.ReLU(),
+            nn.LayerNorm(embedding_dimension),
+            nn.Linear(embedding_dimension, embedding_dimension),
+        )
         self.num_filters = num_filters
+        self.embedding_dimension = embedding_dimension
 
     def inputs(self) -> tuple[str, ...]:
-        return (RETINA_OUTPUT, STATE, FOCUS_POINT)
+        return (RETINA_OUTPUT, PERIPHERAL_OUTPUT, STATE)
 
     def outputs(self) -> tuple[str, ...]:
         return (STATE,)
 
     def forward(self, inputs: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
-        """Compute the new LSTM states given the input and the current states.
+        """Compute the new states given the input and the current states.
 
         Args:
             retina_output: (B, F) retina output tensor
             state: (B, F) previous state tensor
-            focus: (B, 2) current focus
 
         Returns:
             (B, F) new state tensor
         """
         state = inputs[STATE]
         retina_output = inputs[RETINA_OUTPUT]
-        focus = inputs[FOCUS_POINT]
         batch_size = state.shape[0]
-        assert state.shape == (batch_size, self.num_filters)
+        assert state.shape == (batch_size, self.embedding_dimension)
         assert retina_output.shape == (batch_size, self.num_filters)
-        assert focus.shape == (batch_size, 2)
-        focus_embedding = self.focus_norm(
-            torch.relu(self.focus_embedding_network(focus))
-        )
-        retina_embedding = self.retina_norm(
-            torch.relu(self.retina_embedding_network(retina_output))
-        )
-        hidden_state = self.hidden_norm(
-            torch.relu(self.hidden_network(focus_embedding + retina_embedding))
-        )
-        new_state = self.state_norm(
-            torch.relu(state + self.state_network(hidden_state))
-        )
-        assert new_state.shape == (batch_size, self.num_filters)
+        retina_embedding = self.retina_embed(retina_output)
+        new_state = self.state_network(retina_embedding)
+        assert new_state.shape == (batch_size, self.embedding_dimension)
         return {STATE: new_state}
 
 
 class LSTMStateModule(Piece):
     """The module that produces the next eye state."""
 
-    def __init__(self, num_filters: int):
+    def __init__(self, num_filters: int, embedding_dimension: int):
         """Initialize the state module.
 
         Args:
             num_filters: Number of filters for the embedding networks.
+            embedding_dimension: Dimension for the embedding networks.
         """
         super().__init__(piece_type="module")
-        self.focus_embedding_network = nn.Linear(2, num_filters)
-        self.retina_embedding_network = nn.Linear(num_filters, num_filters)
-        self.focus_norm = nn.LayerNorm(num_filters)
-        self.retina_norm = nn.LayerNorm(num_filters)
-        self.lstm = nn.LSTMCell(num_filters, num_filters)
+        self.retina_embedding_network = nn.Linear(num_filters, embedding_dimension)
+        self.retina_norm = nn.LayerNorm(embedding_dimension)
+        self.lstm = nn.LSTMCell(embedding_dimension, embedding_dimension)
         self.num_filters = num_filters
+        self.embedding_dimension = embedding_dimension
 
     def inputs(self) -> tuple[str, ...]:
-        return (RETINA_OUTPUT, STATE, STATE_CELL, FOCUS_POINT)
+        return (RETINA_OUTPUT, STATE, STATE_CELL)
 
     def outputs(self) -> tuple[str, ...]:
         return (STATE, STATE_CELL)
@@ -115,7 +114,6 @@ class LSTMStateModule(Piece):
             retina_output: (B, F) retina output tensor
             state: (B, F) previous state tensor
             cell_state: (B, F) previous cell state tensor
-            focus: (B, 2) current focus
 
         Returns:
             (B, F) new state tensor
@@ -124,23 +122,16 @@ class LSTMStateModule(Piece):
         state = inputs[STATE]
         cell_state = inputs[STATE_CELL]
         retina_output = inputs[RETINA_OUTPUT]
-        focus = inputs[FOCUS_POINT]
         batch_size = state.shape[0]
-        assert state.shape == (batch_size, self.num_filters)
-        assert cell_state.shape == (batch_size, self.num_filters)
+        assert state.shape == (batch_size, self.embedding_dimension)
+        assert cell_state.shape == (batch_size, self.embedding_dimension)
         assert retina_output.shape == (batch_size, self.num_filters)
-        assert focus.shape == (batch_size, 2)
-        focus_embedding = self.focus_norm(
-            torch.relu(self.focus_embedding_network(focus))
-        )
         retina_embedding = self.retina_norm(
             torch.relu(self.retina_embedding_network(retina_output))
         )
-        new_state, new_cell = self.lstm(
-            retina_embedding + focus_embedding, (state, cell_state)
-        )
-        assert new_state.shape == (batch_size, self.num_filters)
-        assert new_cell.shape == (batch_size, self.num_filters)
+        new_state, new_cell = self.lstm(retina_embedding, (state, cell_state))
+        assert new_state.shape == (batch_size, self.embedding_dimension)
+        assert new_cell.shape == (batch_size, self.embedding_dimension)
         return {STATE: new_state, STATE_CELL: new_cell}
 
 
@@ -155,23 +146,23 @@ class SaccadeModule(Composite):
         self,
         dims: tuple[int, int],
         num_filters: int,
-        fovea_radius: float,
-        std: float,
+        embedding_dimension: int,
+        kernel_size: int,
+        num_downsamples: int,
         state_module: Piece,
         retina_frozen: bool = True,
-        motor_noise_std: float = 0.0,
     ):
         retina = RetinaModule(
             dims=dims,
             num_filters=num_filters,
-            fovea_radius=fovea_radius,
-            std=std,
+            kernel_size=kernel_size,
+            num_downsamples=num_downsamples,
             frozen=retina_frozen,
         )
-        motor = MotorModule(
-            dims=dims, num_filters=num_filters, noise_std=motor_noise_std
-        )
+        motor = MotorModule(dims=dims, embedding_dimension=embedding_dimension)
         super().__init__(components=[retina, state_module, motor])
+        self.retina = retina
+        self.motor = motor
 
 
 class EyeModule(Piece):
@@ -181,36 +172,44 @@ class EyeModule(Piece):
         self,
         dims: tuple[int, int],
         num_filters: int,
+        embedding_dimension: int,
         iterations: int,
-        fovea_radius: float,
-        retina_std: float,
+        kernel_size: int,
+        num_downsamples: int,
         recurrent_module: Literal["rnn", "lstm"],
         retina_frozen: bool = True,
-        motor_noise_std: float = 0.0,
     ):
         """Initialize the eye module."""
         super().__init__(piece_type="composite")
         self.num_filters = num_filters
+        self.embedding_dimension = embedding_dimension
         state_module = (
-            LSTMStateModule(num_filters=num_filters)
-            if recurrent_module == "lstm" else RNNStateModule(num_filters=num_filters)
+            LSTMStateModule(
+                num_filters=num_filters,
+                embedding_dimension=embedding_dimension,
+            )
+            if recurrent_module == "lstm"
+            else RNNStateModule(
+                num_filters=num_filters,
+                embedding_dimension=embedding_dimension,
+            )
         )
         self.saccade = SaccadeModule(
             dims=dims,
             num_filters=num_filters,
-            fovea_radius=fovea_radius,
-            std=retina_std,
+            embedding_dimension=embedding_dimension,
+            kernel_size=kernel_size,
+            num_downsamples=num_downsamples,
             retina_frozen=retina_frozen,
-            motor_noise_std=motor_noise_std,
             state_module=state_module,
         )
         self.iterations = iterations
         self.recurrent_module = recurrent_module
 
         # Learnable initial states
-        self.initial_state = nn.Parameter(torch.zeros(num_filters))
+        self.initial_state = nn.Parameter(torch.zeros(embedding_dimension))
         if recurrent_module == "lstm":
-            self.initial_cell_state = nn.Parameter(torch.zeros(num_filters))
+            self.initial_cell_state = nn.Parameter(torch.zeros(embedding_dimension))
 
         # Initialize with Xavier uniform
         nn.init.xavier_uniform_(self.initial_state.unsqueeze(0))
@@ -218,76 +217,92 @@ class EyeModule(Piece):
             nn.init.xavier_uniform_(self.initial_cell_state.unsqueeze(0))
 
     def inputs(self) -> tuple[str, ...]:
-        return (IMAGE_INPUT, FOCUS_POINT)
+        return (IMAGE_INPUT, ATTENTION)
 
     def outputs(self) -> tuple[str, ...]:
-        return (STATE, FOCUS_HISTORY, MOTOR_LOSS)
+        return (STATE, ATTENTION_HISTORY)
 
     def forward(self, inputs: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
-        """Compute the new focus given the input and the current focus.
+        """Compute the new attention given the input and the current attention.
 
         Args:
             image: (B, H, W) input image tensor
-            current_focus: (B, 2) focus tensor
+            current_attention: (B, H, W) attention mask tensor
 
         Returns:
             (B, F) last state values
             (B, I, F) state history
-            (B, I, 2) focus history
+            (B, I, H, W) attention history
             (B, 1) accumulated motor loss
         """
         image = inputs[IMAGE_INPUT]
-        current_focus = inputs[FOCUS_POINT]
+        current_attention = inputs[ATTENTION]
         batch_dimension = image.shape[0]
         assert len(image.shape) == 3
-        assert len(current_focus.shape) == 2
-        assert batch_dimension == current_focus.shape[0]
+        assert len(current_attention.shape) == 3
+        assert batch_dimension == current_attention.shape[0]
 
         state_history = torch.empty(
-            (batch_dimension, self.iterations, self.num_filters),
+            (batch_dimension, self.iterations, self.embedding_dimension),
             device=image.device,
             dtype=image.dtype,
         )
-        focus_history = torch.empty(
-            (batch_dimension, self.iterations, 2),
+        # Attention history stores the attention used for each iteration (not the output of the last iteration)
+        attention_history = torch.empty(
+            (
+                batch_dimension,
+                self.iterations,
+                current_attention.shape[1],
+                current_attention.shape[2],
+            ),
             device=image.device,
             dtype=image.dtype,
         )
-        motor_losses = torch.empty(
-            (batch_dimension, self.iterations),
-            device=image.device,
-            dtype=image.dtype,
-        )
+        # Store initial attention as first element
+        attention_history[:, 0, :, :] = current_attention
+
         # Initialize states using learnable parameters
         state = self.initial_state.unsqueeze(0).expand(batch_dimension, -1).contiguous()
         cell_state = (
-            self.initial_cell_state.unsqueeze(0).expand(batch_dimension, -1).contiguous()
+            self.initial_cell_state.unsqueeze(0)
+            .expand(batch_dimension, -1)
+            .contiguous()
             if self.recurrent_module == "lstm"
             else None
         )
 
+        downsampled = self.saccade.retina.peripheral.downsample(image)
         for i in range(self.iterations):
             current_inputs = {
                 IMAGE_INPUT: image,
-                FOCUS_POINT: current_focus,
+                DOWNSAMPLED_IMAGE: downsampled,
+                ATTENTION: current_attention,
                 STATE: state,
                 STATE_CELL: cell_state,
             }
             outputs = self.saccade(inputs=current_inputs)
-            current_focus = outputs[FOCUS_NEXT]
+            current_attention = outputs[ATTENTION_NEXT]
             state = outputs[STATE]
-            cell_state = outputs[STATE_CELL] if self.recurrent_module == "lstm" else None
-            motor_loss = outputs[MOTOR_LOSS]
+            cell_state = (
+                outputs[STATE_CELL] if self.recurrent_module == "lstm" else None
+            )
             state_history[:, i, :] = state
-            focus_history[:, i, :] = current_focus
-            motor_losses[:, i] = motor_loss.sum(dim=1)
-        aggregated_motor_loss = motor_losses.sum(dim=1, keepdim=True)
-        assert state_history.shape == (batch_dimension, self.iterations, self.num_filters)
-        assert focus_history.shape == (batch_dimension, self.iterations, 2)
-        assert aggregated_motor_loss.shape == (batch_dimension, 1)
+            # Only store attention for iterations 1 through iterations-1 (skip the last unused attention)
+            if i < self.iterations - 1:
+                attention_history[:, i + 1, :, :] = current_attention
+        assert state_history.shape == (
+            batch_dimension,
+            self.iterations,
+            self.embedding_dimension,
+        )
+        assert attention_history.shape == (
+            batch_dimension,
+            self.iterations,
+            current_attention.shape[1],
+            current_attention.shape[2],
+        )
         return {
             STATE: state,
             STATE_HISTORY: state_history,
-            FOCUS_HISTORY: focus_history,
-            MOTOR_LOSS: aggregated_motor_loss,
+            ATTENTION_HISTORY: attention_history,
         }

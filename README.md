@@ -1,5 +1,15 @@
 # eye
 
+## About
+
+This project explores a simplified model of the eye and trains it on the Fashion MNIST dataset.
+
+The module consists of three components under the `eye/architecture` directory.
+- [module.py](eye/architecture/module.py)
+- [retina.py](eye/architecture/retina.py)
+- [motor.py](eye/architecture/motor.py)
+
+
 ## Setup
 
 This project uses [uv](https://docs.astral.sh/uv/) for Python package management.
