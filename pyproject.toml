@@ -12,8 +12,8 @@ dependencies = [
     "optuna-dashboard>=0.19.0",
     "pydantic-settings>=2.10.1",
     "tensorboard>=2.20.0",
-    "torch==2.7.1", # Version 2.8 does not support GTX 1080
-    "torchvision==0.22.1", # Version 0.23 goes along with torch==2.8
+    "torch==2.13.0",
+    "torchvision==0.28.0",
 ]
 
 [dependency-groups]
@@ -23,3 +23,10 @@ dev = [
 
 [tool.uv.sources]
 jigsaw-ml = { git = "https://github.com/asparagus/jigsaw-ml", rev = "main" }
+torch = { index = "pytorch-cu129" }
+torchvision = { index = "pytorch-cu129" }
+
+[[tool.uv.index]]
+name = "pytorch-cu129"
+url = "https://download.pytorch.org/whl/cu129"
+explicit = true

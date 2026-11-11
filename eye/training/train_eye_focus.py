@@ -558,11 +558,3 @@ def train(
     logger.info(f"Validation accuracy: {validation_accuracy:.4f}")
 
     return validation_accuracy
-
-
-if __name__ == "__main__":
-    study = optuna.create_study(
-        storage="sqlite:///db.sqlite3",
-        direction="maximize",
-    )
-    study.optimize(objective, n_trials=100, n_jobs=2)
