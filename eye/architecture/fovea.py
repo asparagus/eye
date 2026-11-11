@@ -47,10 +47,6 @@ class FoveaModule(Piece):
             for param in self.conv.parameters():
                 param.requires_grad = False
 
-        # Pre-compute coordinate vectors for efficiency
-        self.x_coords = torch.arange(dims[1], dtype=torch.float32)  # Width
-        self.y_coords = torch.arange(dims[0], dtype=torch.float32)  # Height
-
         self.layer_norm = torch.nn.LayerNorm(num_filters)
 
     def filter_output(
